@@ -1,6 +1,6 @@
 /**
  * Scraper standalone — roda no GitHub Actions (servidores Azure, IPs variados)
- * Faz scraping da CEF e salva direto no Supabase.
+ * Faz scraping do LeilaoBrasil.com.br e salva direto no Supabase.
  * Depois chama /api/analyze no Vercel para o Gemini analisar os novos imóveis.
  */
 
@@ -18,44 +18,44 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY)
 
-const CIDADES_SP = [
-  'SAO PAULO','GUARULHOS','OSASCO','SANTO ANDRE','SAO BERNARDO DO CAMPO',
-  'MAUA','DIADEMA','CARAPICUIBA','MOGI DAS CRUZES','SUZANO','ITAQUAQUECETUBA',
-  'BARUERI','COTIA','CAMPINAS','SAO JOSE DOS CAMPOS','SOROCABA','RIBEIRAO PRETO',
-  'SANTOS','SAO VICENTE','PRAIA GRANDE','GUARUJA','BERTIOGA','CARAGUATATUBA',
-  'UBATUBA','SAO SEBASTIAO','ILHABELA','JUNDIAI','BAURU','PIRACICABA','TAUBATE',
-  'SAO JOSE DO RIO PRETO','AMERICANA','SAO CARLOS','LIMEIRA',
-]
-
 const TIPOS_MAP = {
-  'APARTAMENTO':'residencial','CASA':'residencial','CASA COMERCIAL':'residencial',
-  'GALPAO':'galpao','GALPÃO':'galpao','TERRENO':'terreno','LOTE':'terreno',
-  'AREA':'terreno','ÁREA':'terreno',
+  'APARTAMENTO': 'residencial', 'APTO': 'residencial',
+  'CASA': 'residencial', 'SOBRADO': 'residencial',
+  'KITNET': 'residencial', 'STUDIO': 'residencial',
+  'FLAT': 'residencial', 'COBERTURA': 'residencial',
+  'RESIDENCIAL': 'residencial',
+  'GALPAO': 'galpao', 'GALPÃO': 'galpao',
+  'ARMAZEM': 'galpao', 'ARMAZÉM': 'galpao',
+  'DEPOSITO': 'galpao', 'DEPÓSITO': 'galpao',
+  'BARRACAO': 'galpao', 'BARRACÃO': 'galpao',
+  'TERRENO': 'terreno', 'LOTE': 'terreno',
+  'AREA': 'terreno', 'ÁREA': 'terreno', 'GLEBA': 'terreno',
 }
 
 function normalizarTipo(titulo) {
-  const up = titulo.toUpperCase()
+  const up = titulo.toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
   for (const [k, v] of Object.entries(TIPOS_MAP)) {
-    if (up.includes(k)) return v
+    const kn = k.normalize('NFD').replace(/[̀-ͯ]/g, '')
+    if (up.includes(kn)) return v
   }
   return null
 }
 
 function parseMoeda(s) {
   if (!s) return null
-  const n = parseFloat(s.replace(/[R$\s.]/g,'').replace(',','.'))
+  const n = parseFloat(s.replace(/[R$\s.]/g, '').replace(',', '.'))
   return isNaN(n) ? null : n
 }
 
 function parseArea(s) {
   const m = s.match(/(\d+[.,]?\d*)\s*m[²2]/i)
-  return m ? parseFloat(m[1].replace(',','.')) : null
+  return m ? parseFloat(m[1].replace(',', '.')) : null
 }
 
 async function fetchPage(url) {
   const r = await fetch(url, {
     headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       'Accept-Language': 'pt-BR,pt;q=0.9',
     },
@@ -65,57 +65,128 @@ async function fetchPage(url) {
   return r.text()
 }
 
-async function scraperCaixa() {
+function extrairCidade(texto) {
+  // "SP - São Paulo" ou "SP – Guarulhos"
+  const m = texto.match(/\bSP\s*[-–]\s*([A-Za-zÀ-ú][A-Za-zÀ-ú\s.'-]{1,40})/u)
+  if (!m) return null
+  return m[1].trim().replace(/\s+/g, ' ')
+}
+
+function extrairData(texto) {
+  // "Abertura: 22/05/2026 10:33" ou "Fechamento: ..."
+  const m = texto.match(/Aber(?:tura)?[:\s]+(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}:\d{2})/i)
+  if (!m) return null
+  const [, d, mo, y, t] = m
+  return new Date(`${y}-${mo}-${d}T${t}:00-03:00`).toISOString()
+}
+
+async function scraperLeilaoBrasil() {
   const imoveis = []
-  for (let pagina = 1; pagina <= 15; pagina++) {
-    try {
-      const url = `https://venda.caixa.gov.br/imovels/busca-imovel.asp?sltEstado=SP&pagina=${pagina}`
-      const html = await fetchPage(url)
-      const $ = cheerio.load(html)
+  const seen = new Set()
 
-      // Múltiplos seletores para cobrir variações de layout
-      const linhas = $('table tr, .result-item, .imovel-card').toArray()
-      if (linhas.length < 2) { console.log(`  Página ${pagina}: sem resultados, parando.`); break }
+  console.log('  Buscando página principal...')
+  const html = await fetchPage('https://www.leilaobrasil.com.br')
+  const $ = cheerio.load(html)
 
-      let encontrados = 0
-      for (const row of linhas) {
-        const el = $(row)
-        const link = el.find('a[href*="imovel"], a[href*="lote"]').first()
-        const href = link.attr('href')
-        if (!href) continue
+  // Detectar seletor correto de card
+  const totalItemLeilao = $('.item-leilao').length
+  const totalHCard      = $('.h-card').length
+  const totalFCard      = $('.f-card').length
+  console.log(`  Seletores encontrados: .item-leilao=${totalItemLeilao} .h-card=${totalHCard} .f-card=${totalFCard}`)
 
-        const url_original = href.startsWith('http') ? href : `https://venda.caixa.gov.br${href}`
-        const titulo = link.text().trim() || el.find('h2, h3, .titulo').first().text().trim()
-        const texto = el.text()
-        const valores = texto.match(/R\$\s*[\d.,]+/g) || []
-        const cidade = CIDADES_SP.find(c => texto.normalize('NFD').replace(/[̀-ͯ]/g,'').toUpperCase().includes(c)) || null
+  // Usar o que retornar mais resultados
+  const seletor = totalItemLeilao > 0 ? '.item-leilao'
+                : totalHCard > 0      ? '.h-card'
+                : '.f-card'
 
-        const tipo = normalizarTipo(titulo)
-        if (!tipo) continue
-        if (!cidade && !texto.toUpperCase().includes('/SP')) continue
+  console.log(`  Usando seletor: ${seletor}`)
 
-        imoveis.push({
-          fonte: 'caixa',
-          url_original,
-          titulo: titulo || null,
-          tipo,
-          cidade,
-          area_m2: parseArea(texto),
-          valor_avaliacao: valores[0] ? parseMoeda(valores[0]) : null,
-          valor_minimo: valores[1] ? parseMoeda(valores[1]) : null,
-          raw_data: { pagina, snippet: texto.substring(0, 500) },
-        })
-        encontrados++
-      }
-
-      console.log(`  Página ${pagina}: ${encontrados} imóveis`)
-      if (encontrados === 0) break
-      await new Promise(r => setTimeout(r, 1500))
-    } catch (e) {
-      console.error(`  Página ${pagina} erro: ${e.message}`)
-      break
-    }
+  // Debug: mostrar texto do primeiro card
+  const primeiroCard = $(seletor).first()
+  if (primeiroCard.length) {
+    console.log(`  --- Texto 1º card (300 chars) ---`)
+    console.log(`  ${primeiroCard.text().replace(/\s+/g, ' ').substring(0, 300)}`)
+    console.log(`  --- Links no 1º card ---`)
+    primeiroCard.find('a[href]').each((_, a) => {
+      console.log(`    href: ${$(a).attr('href')}`)
+    })
+    console.log(`  ---`)
   }
+
+  $(seletor).each((i, el) => {
+    const card = $(el)
+    const texto = card.text().replace(/\s+/g, ' ')
+
+    // Apenas SP
+    if (!texto.includes('SP -') && !texto.includes('SP –') && !texto.includes('- SP')) return
+
+    // Link do imóvel
+    const link = card.find('a[href*="/eventos/leilao/"]').first()
+    const href = link.attr('href')
+    if (!href) return
+
+    const url_original = href.startsWith('http')
+      ? href
+      : `https://www.leilaobrasil.com.br${href}`
+
+    if (seen.has(url_original)) return
+    seen.add(url_original)
+
+    // Título
+    const titulo = (
+      card.find('h2, h3, h4, .titulo, .title').first().text().trim() ||
+      link.text().trim()
+    ).replace(/\s+/g, ' ')
+
+    if (!titulo || titulo.length < 5) return
+
+    // Tipo
+    const tipo = normalizarTipo(titulo)
+    if (!tipo) return
+
+    // Cidade
+    const cidade = extrairCidade(texto)
+
+    // Valores — "Valor inicial: R$ 2.625.000,00"
+    const valoresMatch = [...texto.matchAll(/R\$\s*([\d.]+,\d{2})/g)]
+    const valor_minimo   = valoresMatch[0] ? parseMoeda('R$ ' + valoresMatch[0][1]) : null
+    const valor_avaliacao = valoresMatch[1] ? parseMoeda('R$ ' + valoresMatch[1][1]) : null
+
+    // Data do leilão
+    const data_leilao = extrairData(texto)
+
+    // Desconto
+    const discMatch = texto.match(/(\d+)%\s*desconto/i)
+    const desconto = discMatch ? parseInt(discMatch[1]) : null
+
+    // Status de ocupação
+    let status_ocupacao = 'desconhecido'
+    if (/desocupado|livre|vago/i.test(texto))  status_ocupacao = 'desocupado'
+    if (/ocupado/i.test(texto))                 status_ocupacao = 'ocupado'
+
+    imoveis.push({
+      fonte: 'leilaobrasil',
+      url_original,
+      titulo,
+      tipo,
+      cidade,
+      area_m2: parseArea(titulo),
+      valor_avaliacao,
+      valor_minimo,
+      data_leilao,
+      status_ocupacao,
+      raw_data: {
+        desconto,
+        snippet: texto.substring(0, 600),
+      },
+    })
+  })
+
+  console.log(`  Total SP encontrado: ${imoveis.length} imóveis`)
+  // Log amostra
+  imoveis.slice(0, 3).forEach(im =>
+    console.log(`    [${im.tipo}] ${im.titulo.substring(0,60)} | ${im.cidade} | R$ ${im.valor_minimo?.toLocaleString('pt-BR') ?? '?'}`)
+  )
   return imoveis
 }
 
@@ -130,7 +201,6 @@ async function salvarNoSupabase(imoveis, fonte) {
     if (error) { console.error('Erro Supabase:', error.message); continue }
     novos += data?.length ?? 0
   }
-
   await sb.from('execucoes_log').insert({
     fonte, total_encontrados: imoveis.length, novos, analisados: 0, erros: 0,
   })
@@ -138,7 +208,7 @@ async function salvarNoSupabase(imoveis, fonte) {
 }
 
 async function triggrarAnalise() {
-  if (!CRON_SECRET) return 0
+  if (!CRON_SECRET) { console.log('  CRON_SECRET ausente, pulando análise'); return 0 }
   try {
     const r = await fetch(`${APP_URL}/api/analyze`, {
       method: 'POST',
@@ -157,12 +227,12 @@ async function triggrarAnalise() {
 async function main() {
   console.log(`\n=== Leilão Radar — Scraper (${new Date().toLocaleString('pt-BR')}) ===\n`)
 
-  console.log('1. Scraping Caixa Econômica Federal...')
-  const imoveis = await scraperCaixa()
+  console.log('1. Scraping LeilaoBrasil.com.br (SP)...')
+  const imoveis = await scraperLeilaoBrasil()
   console.log(`   Total encontrado: ${imoveis.length} imóveis`)
 
   console.log('\n2. Salvando no Supabase...')
-  const novos = await salvarNoSupabase(imoveis, 'caixa')
+  const novos = await salvarNoSupabase(imoveis, 'leilaobrasil')
   console.log(`   Novos registros: ${novos}`)
 
   console.log('\n3. Acionando análise via Gemini...')

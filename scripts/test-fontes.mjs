@@ -1,49 +1,69 @@
-// Testa quais fontes e analisa estrutura HTML das que funcionam
-const ANALISAR = ['https://www.leilaobrasil.com.br', 'https://www.sodresantoro.com.br/imoveis']
+// Testa acessibilidade das fontes e analisa estrutura HTML do LeilaoBrasil
+const PRINCIPAL = 'https://www.leilaobrasil.com.br'
 
-for (const url of ANALISAR) {
-  console.log(`\n=== ESTRUTURA: ${url} ===`)
-  try {
-    const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(15000) })
-    const html = await r.text()
-    // Mostrar trecho com links de imóveis
-    const matches = [...html.matchAll(/href="([^"]*imovel[^"]*|[^"]*lote[^"]*|[^"]*leilao[^"]*)"[^>]*>([^<]{5,60})</gi)]
-    console.log(`Links encontrados (primeiros 15):`)
-    matches.slice(0, 15).forEach(m => console.log(`  ${m[1]} → "${m[2].trim()}"`) )
-    // Mostrar trecho com valores
-    const valores = [...html.matchAll(/R\$\s*[\d.,]{4,}/g)].slice(0, 10)
-    console.log(`Valores encontrados: ${valores.map(m => m[0]).join(' | ')}`)
-    // Mostrar classes CSS com 'imovel' ou 'lote'
-    const classes = [...new Set([...html.matchAll(/class="([^"]*(?:imovel|lote|item|card|listing)[^"]*)"/gi)].map(m => m[1]))]
-    console.log(`Classes relevantes: ${classes.slice(0,8).join(', ')}`)
-  } catch(e) { console.log(`Erro: ${e.message}`) }
+console.log(`\n=== ANÁLISE DE ESTRUTURA: ${PRINCIPAL} ===`)
+try {
+  const r = await fetch(PRINCIPAL, {
+    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36' },
+    signal: AbortSignal.timeout(20000),
+  })
+  const html = await r.text()
+  console.log(`Status: ${r.status} | Tamanho: ${(html.length/1024).toFixed(0)}KB`)
+
+  // Contagem de classes relevantes
+  const classes = ['item-leilao', 'h-card', 'f-card', 'flex-cards', 'item-desconto']
+  for (const cls of classes) {
+    const count = (html.match(new RegExp(`class="[^"]*${cls}[^"]*"`, 'g')) || []).length
+    console.log(`  .${cls}: ${count} ocorrências`)
+  }
+
+  // Mostrar HTML bruto do primeiro card encontrado para debug
+  const cardPatterns = ['item-leilao', 'h-card', 'f-card']
+  for (const cls of cardPatterns) {
+    const idx = html.indexOf(`class="${cls}`)
+    if (idx === -1) continue
+    // Pegar ~800 chars do ponto onde o card começa (retroceder para a <div>)
+    const start = html.lastIndexOf('<div', idx)
+    console.log(`\n--- Amostra HTML do primeiro .${cls} (800 chars) ---`)
+    console.log(html.substring(start, start + 800))
+    break
+  }
+
+  // Links de imóveis encontrados
+  const linksImovel = [...html.matchAll(/href="(\/eventos\/leilao\/[^"]+)"/g)]
+  console.log(`\nLinks /eventos/leilao/ encontrados: ${linksImovel.length}`)
+  linksImovel.slice(0, 5).forEach(m => console.log(`  ${m[1]}`))
+
+  // Valores R$
+  const valores = [...html.matchAll(/R\$\s*[\d.,]{4,}/g)].slice(0, 8)
+  console.log(`\nValores R$ (primeiros 8): ${valores.map(m => m[0]).join(' | ')}`)
+
+  // Cidades SP
+  const cidadesSP = [...html.matchAll(/SP\s*[-–]\s*([A-Za-zÀ-ú][A-Za-zÀ-ú\s]{2,25})/gu)]
+  const uniqueCidades = [...new Set(cidadesSP.map(m => m[1].trim()))].slice(0, 10)
+  console.log(`\nCidades SP encontradas: ${uniqueCidades.join(', ')}`)
+
+} catch(e) {
+  console.log(`Erro: ${e.message}`)
 }
-console.log('\n=== TESTE DE ACESSIBILIDADE ===')
-const fontes = [
-  'https://venda.caixa.gov.br/imovels/busca-imovel.asp?sltEstado=SP',
-  'https://www.caixa.gov.br/voce/habitacao/compra-imovel',
-  'https://habitacao-app.caixa.gov.br/imoveis',
-  'https://leiloes.caixa.gov.br/imoveis',
-  'https://leiloes.bb.com.br/imoveis?estado=SP',
-  'https://www.leilaobrasil.com.br',
-  'https://megaleiloes.com.br/imoveis?estado=SP&tipo=imovel',
-  'https://leilao.net/imoveis?estado=SP',
-  'https://www.caixa.gov.br/Downloads/habitacao-documentos-varios/Imov%C3%A9is-dispon%C3%ADveis-para-venda.xlsx',
-  'https://leiloeiro.com.br/peca.asp?lote=imovel&estado=SP',
-  'https://www.sodresantoro.com.br/imoveis',
-]
 
+console.log('\n=== TESTE RÁPIDO DE OUTRAS FONTES ===')
+const fontes = [
+  'https://megaleiloes.com.br',
+  'https://www.sodresantoro.com.br/imoveis',
+  'https://leilao.net',
+]
 for (const url of fontes) {
   try {
     const r = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LeilaoRadar/1.0)' },
+      headers: { 'User-Agent': 'Mozilla/5.0' },
       signal: AbortSignal.timeout(10000),
       redirect: 'follow',
     })
     const text = await r.text()
     const kws = (text.match(/imovel|leil[aã]o|lance|avalia|arrema/gi) || []).length
-    console.log(`[${r.status}] ${text.length}chars ${kws}kw — ${url}`)
+    console.log(`[${r.status}] ${(text.length/1024).toFixed(0)}KB ${kws}kw — ${url}`)
   } catch (e) {
-    console.log(`[ERRO: ${e.cause?.code || e.message.substring(0,30)}] — ${url}`)
+    console.log(`[ERRO: ${e.cause?.code || e.message.substring(0,40)}] — ${url}`)
   }
 }
