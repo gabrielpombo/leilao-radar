@@ -3,7 +3,9 @@ import { executarScraper } from '@/lib/scrapers'
 import { analisarPendentes } from '@/lib/claude'
 import { notificarOportunidades } from '@/lib/telegram'
 
-// Esta rota é chamada pelo Vercel Cron (e pode ser chamada manualmente para teste)
+// Força execução no servidor de São Paulo — necessário para acessar sites gov.br
+export const preferredRegion = 'gru1'
+export const maxDuration = 300
 export async function POST(request: NextRequest) {
   const secret = request.headers.get('x-cron-secret') || request.nextUrl.searchParams.get('secret')
 

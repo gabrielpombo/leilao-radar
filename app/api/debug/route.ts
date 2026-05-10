@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 
+export const preferredRegion = 'gru1'
+export const maxDuration = 30
+
 export async function GET(request: NextRequest) {
   const secret = request.nextUrl.searchParams.get('secret')
   if (secret !== process.env.CRON_SECRET) {
