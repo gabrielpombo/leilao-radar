@@ -1,8 +1,8 @@
-import Anthropic from '@anthropic-ai/sdk'
+import { GoogleGenerativeAI } from '@google/generative-ai'
 import { supabaseAdmin } from '@/lib/supabase'
 import type { Imovel, Recomendacao } from '@/types'
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!)
 
 interface ResultadoAnalise {
   analise_completa: string
@@ -68,20 +68,10 @@ Para recomendação:
 
 export async function analisarImovel(imovel: Imovel): Promise<ResultadoAnalise | null> {
   try {
-    const message = await client.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 2048,
-      messages: [
-        {
-          role: 'user',
-          content: buildPrompt(imovel),
-        },
-      ],
-    })
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' })
+    const result = await model.generateContent(buildPrompt(imovel))
+    const texto = result.response.text()
 
-    const texto = message.content[0].type === 'text' ? message.content[0].text : ''
-
-    // Extrai o JSON da resposta
     const jsonMatch = texto.match(/\{[\s\S]*\}/)
     if (!jsonMatch) throw new Error('JSON não encontrado na resposta')
 
