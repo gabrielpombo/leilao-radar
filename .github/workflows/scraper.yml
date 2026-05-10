@@ -32,5 +32,8 @@ jobs:
       - name: Instalar dependências
         run: npm ci
 
+      - name: Testar fontes acessíveis
+        run: node scripts/test-fontes.mjs
+
       - name: Executar scraper
         run: node scripts/run-scraper.mjs
