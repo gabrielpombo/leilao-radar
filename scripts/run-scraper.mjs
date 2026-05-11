@@ -88,42 +88,32 @@ async function scraperLeilaoBrasil() {
   const html = await fetchPage('https://www.leilaobrasil.com.br')
   const $ = cheerio.load(html)
 
-  // Detectar seletor correto de card
-  const totalItemLeilao = $('.item-leilao').length
-  const totalHCard      = $('.h-card').length
-  const totalFCard      = $('.f-card').length
-  console.log(`  Seletores encontrados: .item-leilao=${totalItemLeilao} .h-card=${totalHCard} .f-card=${totalFCard}`)
+  const totalImgs = $('img.img-evento[alt]').length
+  console.log(`  Imagens img-evento encontradas: ${totalImgs}`)
 
-  // Usar o que retornar mais resultados
-  const seletor = totalItemLeilao > 0 ? '.item-leilao'
-                : totalHCard > 0      ? '.h-card'
-                : '.f-card'
-
-  console.log(`  Usando seletor: ${seletor}`)
-
-  // Debug: mostrar texto do primeiro card
-  const primeiroCard = $(seletor).first()
-  if (primeiroCard.length) {
-    console.log(`  --- Texto 1º card (300 chars) ---`)
-    console.log(`  ${primeiroCard.text().replace(/\s+/g, ' ').substring(0, 300)}`)
-    console.log(`  --- Links no 1º card ---`)
-    primeiroCard.find('a[href]').each((_, a) => {
-      console.log(`    href: ${$(a).attr('href')}`)
-    })
+  // Debug: mostrar dados do primeiro item
+  const firstImg = $('img.img-evento[alt]').first()
+  if (firstImg.length) {
+    const hc = firstImg.parent('a').closest('.h-card')
+    const ci = hc.next('.cont-infos')
+    console.log(`  --- Debug 1º item ---`)
+    console.log(`  alt: ${firstImg.attr('alt')}`)
+    console.log(`  href: ${firstImg.parent('a').attr('href')}`)
+    console.log(`  cont-infos (200 chars): ${ci.text().replace(/\s+/g, ' ').substring(0, 200)}`)
     console.log(`  ---`)
   }
 
-  $(seletor).each((i, el) => {
-    const card = $(el)
-    const texto = card.text().replace(/\s+/g, ' ')
+  // .h-card is the image container; .cont-infos (sibling) holds city/values/dates.
+  // Title comes from the img alt attribute inside .h-card.
+  $('img.img-evento[alt]').each((_, imgEl) => {
+    const img = $(imgEl)
+    const titulo = img.attr('alt')?.replace(/\s+/g, ' ').trim() || ''
+    if (!titulo || titulo.length < 5) return
 
-    // Apenas SP
-    if (!texto.includes('SP -') && !texto.includes('SP –') && !texto.includes('- SP')) return
-
-    // Link do imóvel
-    const link = card.find('a[href*="/eventos/leilao/"]').first()
-    const href = link.attr('href')
-    if (!href) return
+    // URL from the wrapping <a>
+    const anchor = img.parent('a')
+    const href = anchor.attr('href')
+    if (!href || !href.includes('/eventos/leilao/')) return
 
     const url_original = href.startsWith('http')
       ? href
@@ -132,13 +122,13 @@ async function scraperLeilaoBrasil() {
     if (seen.has(url_original)) return
     seen.add(url_original)
 
-    // Título
-    const titulo = (
-      card.find('h2, h3, h4, .titulo, .title').first().text().trim() ||
-      link.text().trim()
-    ).replace(/\s+/g, ' ')
+    // Sibling .cont-infos for all metadata
+    const hcard = anchor.closest('.h-card')
+    const contInfos = hcard.next('.cont-infos')
+    const texto = contInfos.text().replace(/\s+/g, ' ')
 
-    if (!titulo || titulo.length < 5) return
+    // Apenas SP
+    if (!texto.includes('SP -') && !texto.includes('SP –')) return
 
     // Tipo
     const tipo = normalizarTipo(titulo)
@@ -149,7 +139,7 @@ async function scraperLeilaoBrasil() {
 
     // Valores — "Valor inicial: R$ 2.625.000,00"
     const valoresMatch = [...texto.matchAll(/R\$\s*([\d.]+,\d{2})/g)]
-    const valor_minimo   = valoresMatch[0] ? parseMoeda('R$ ' + valoresMatch[0][1]) : null
+    const valor_minimo    = valoresMatch[0] ? parseMoeda('R$ ' + valoresMatch[0][1]) : null
     const valor_avaliacao = valoresMatch[1] ? parseMoeda('R$ ' + valoresMatch[1][1]) : null
 
     // Data do leilão
@@ -162,7 +152,7 @@ async function scraperLeilaoBrasil() {
     // Status de ocupação
     let status_ocupacao = 'desconhecido'
     if (/desocupado|livre|vago/i.test(texto))  status_ocupacao = 'desocupado'
-    if (/ocupado/i.test(texto))                 status_ocupacao = 'ocupado'
+    else if (/ocupado/i.test(texto))            status_ocupacao = 'ocupado'
 
     imoveis.push({
       fonte: 'leilaobrasil',
