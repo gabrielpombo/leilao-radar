@@ -1,5 +1,5 @@
 import { Suspense } from 'react'
-import { supabase } from '@/lib/supabase'
+import { supabaseAdmin as supabase } from '@/lib/supabase'
 import { ImovelCard } from '@/components/ImovelCard'
 import { FiltroBar } from '@/components/FiltroBar'
 import type { ImovelComAnalise } from '@/types'

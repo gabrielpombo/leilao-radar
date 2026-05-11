@@ -1,6 +1,6 @@
 import { notFound } from 'next/navigation'
 import Link from 'next/link'
-import { supabase } from '@/lib/supabase'
+import { supabaseAdmin as supabase } from '@/lib/supabase'
 import type { ImovelComAnalise } from '@/types'
 
 function formatarMoeda(valor: number | null) {
