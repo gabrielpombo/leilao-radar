@@ -15,7 +15,6 @@ async function buscarImoveis(params: SearchParams): Promise<ImovelComAnalise[]> 
   let query = supabase
     .from('imoveis')
     .select('*, analises(*)')
-    .eq('analisado', true)
 
   if (params.tipo) query = query.eq('tipo', params.tipo)
   if (params.cidade) query = query.ilike('cidade', `%${params.cidade}%`)
