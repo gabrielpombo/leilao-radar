@@ -1,22 +1,26 @@
 /**
- * Scraper standalone — roda no GitHub Actions (servidores Azure, IPs variados)
- * Faz scraping do LeilaoBrasil.com.br e salva direto no Supabase.
- * Depois chama /api/analyze no Vercel para o Gemini analisar os novos imóveis.
+ * Scraper standalone — roda no GitHub Actions (15 min de timeout, IPs variados)
+ * 1. Faz scraping do LeilaoBrasil.com.br para SP
+ * 2. Salva novos imóveis no Supabase
+ * 3. Analisa pendentes direto com Gemini (sem precisar da rota Vercel)
  */
 
 import { createClient } from '@supabase/supabase-js'
 import * as cheerio from 'cheerio'
+import { GoogleGenerativeAI } from '@google/generative-ai'
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
-const CRON_SECRET  = process.env.CRON_SECRET
-const APP_URL      = 'https://leilao-radar-mu.vercel.app'
+const GEMINI_KEY   = process.env.GEMINI_API_KEY
 
 if (!SUPABASE_URL || !SUPABASE_KEY) {
   console.error('Variáveis Supabase não definidas'); process.exit(1)
 }
 
-const sb = createClient(SUPABASE_URL, SUPABASE_KEY)
+const sb    = createClient(SUPABASE_URL, SUPABASE_KEY)
+const genAI = GEMINI_KEY ? new GoogleGenerativeAI(GEMINI_KEY) : null
+
+// ─── Tipos ────────────────────────────────────────────────────────────────────
 
 const TIPOS_MAP = {
   'APARTAMENTO': 'residencial', 'APTO': 'residencial',
@@ -35,8 +39,7 @@ const TIPOS_MAP = {
 function normalizarTipo(titulo) {
   const up = titulo.toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
   for (const [k, v] of Object.entries(TIPOS_MAP)) {
-    const kn = k.normalize('NFD').replace(/[̀-ͯ]/g, '')
-    if (up.includes(kn)) return v
+    if (up.includes(k.normalize('NFD').replace(/[̀-ͯ]/g, ''))) return v
   }
   return null
 }
@@ -52,6 +55,21 @@ function parseArea(s) {
   return m ? parseFloat(m[1].replace(',', '.')) : null
 }
 
+function extrairCidade(texto) {
+  const m = texto.match(/\bSP\s*[-–]\s*([A-Za-zÀ-ú][A-Za-zÀ-ú\s.'-]{1,40})/u)
+  if (!m) return null
+  return m[1].trim().replace(/\s+/g, ' ')
+}
+
+function extrairData(texto) {
+  const m = texto.match(/Aber(?:tura)?[:\s]+(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}:\d{2})/i)
+  if (!m) return null
+  const [, d, mo, y, t] = m
+  return new Date(`${y}-${mo}-${d}T${t}:00-03:00`).toISOString()
+}
+
+// ─── Scraper ──────────────────────────────────────────────────────────────────
+
 async function fetchPage(url) {
   const r = await fetch(url, {
     headers: {
@@ -65,21 +83,6 @@ async function fetchPage(url) {
   return r.text()
 }
 
-function extrairCidade(texto) {
-  // "SP - São Paulo" ou "SP – Guarulhos"
-  const m = texto.match(/\bSP\s*[-–]\s*([A-Za-zÀ-ú][A-Za-zÀ-ú\s.'-]{1,40})/u)
-  if (!m) return null
-  return m[1].trim().replace(/\s+/g, ' ')
-}
-
-function extrairData(texto) {
-  // "Abertura: 22/05/2026 10:33" ou "Fechamento: ..."
-  const m = texto.match(/Aber(?:tura)?[:\s]+(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}:\d{2})/i)
-  if (!m) return null
-  const [, d, mo, y, t] = m
-  return new Date(`${y}-${mo}-${d}T${t}:00-03:00`).toISOString()
-}
-
 async function scraperLeilaoBrasil() {
   const imoveis = []
   const seen = new Set()
@@ -88,20 +91,10 @@ async function scraperLeilaoBrasil() {
   const html = await fetchPage('https://www.leilaobrasil.com.br')
   const $ = cheerio.load(html)
 
-  // Positional match: Nth img.img-evento corresponds to Nth .cont-infos
+  // Nth img.img-evento ↔ Nth .cont-infos (positional match)
   const imgs      = $('img.img-evento[alt]').toArray()
   const contInfos = $('.cont-infos').toArray()
   console.log(`  img.img-evento: ${imgs.length} | .cont-infos: ${contInfos.length}`)
-
-  // Debug first pair
-  if (imgs.length && contInfos.length) {
-    const ci0text = $(contInfos[0]).text().replace(/\s+/g, ' ').substring(0, 250)
-    console.log(`  --- Debug 1º item ---`)
-    console.log(`  alt: ${$(imgs[0]).attr('alt')}`)
-    console.log(`  href: ${$(imgs[0]).parent('a').attr('href')}`)
-    console.log(`  cont-infos[0] (250 chars): ${ci0text}`)
-    console.log(`  ---`)
-  }
 
   const count = Math.min(imgs.length, contInfos.length)
   for (let i = 0; i < count; i++) {
@@ -123,32 +116,19 @@ async function scraperLeilaoBrasil() {
 
     const texto = ci.text().replace(/\s+/g, ' ')
 
-    // Apenas SP
     if (!texto.includes('SP -') && !texto.includes('SP –')) continue
 
-    // Tipo
     const tipo = normalizarTipo(titulo)
     if (!tipo) continue
 
-    // Cidade
     const cidade = extrairCidade(texto)
-
-    // Valores
     const valoresMatch = [...texto.matchAll(/R\$\s*([\d.]+,\d{2})/g)]
-    const valor_minimo    = valoresMatch[0] ? parseMoeda('R$ ' + valoresMatch[0][1]) : null
-    const valor_avaliacao = valoresMatch[1] ? parseMoeda('R$ ' + valoresMatch[1][1]) : null
 
-    // Data do leilão
-    const data_leilao = extrairData(texto)
-
-    // Desconto
-    const discMatch = texto.match(/(\d+)%\s*desconto/i)
-    const desconto = discMatch ? parseInt(discMatch[1]) : null
-
-    // Status de ocupação
     let status_ocupacao = 'desconhecido'
     if (/desocupado|livre|vago/i.test(texto))  status_ocupacao = 'desocupado'
     else if (/ocupado/i.test(texto))            status_ocupacao = 'ocupado'
+
+    const discMatch = texto.match(/(\d+)%\s*desconto/i)
 
     imoveis.push({
       fonte: 'leilaobrasil',
@@ -157,21 +137,20 @@ async function scraperLeilaoBrasil() {
       tipo,
       cidade,
       area_m2: parseArea(titulo),
-      valor_avaliacao,
-      valor_minimo,
-      data_leilao,
+      valor_avaliacao: valoresMatch[1] ? parseMoeda('R$ ' + valoresMatch[1][1]) : null,
+      valor_minimo:    valoresMatch[0] ? parseMoeda('R$ ' + valoresMatch[0][1]) : null,
+      data_leilao: extrairData(texto),
       status_ocupacao,
       raw_data: {
-        desconto,
+        desconto: discMatch ? parseInt(discMatch[1]) : null,
         snippet: texto.substring(0, 600),
       },
     })
   }
 
-  console.log(`  Total SP encontrado: ${imoveis.length} imóveis`)
-  // Log amostra
+  console.log(`  SP encontrado: ${imoveis.length} imóveis`)
   imoveis.slice(0, 3).forEach(im =>
-    console.log(`    [${im.tipo}] ${im.titulo.substring(0,60)} | ${im.cidade} | R$ ${im.valor_minimo?.toLocaleString('pt-BR') ?? '?'}`)
+    console.log(`    [${im.tipo}] ${im.titulo.substring(0, 55)} | ${im.cidade} | R$ ${im.valor_minimo?.toLocaleString('pt-BR') ?? '?'}`)
   )
   return imoveis
 }
@@ -193,22 +172,107 @@ async function salvarNoSupabase(imoveis, fonte) {
   return novos
 }
 
-async function triggrarAnalise() {
-  if (!CRON_SECRET) { console.log('  CRON_SECRET ausente, pulando análise'); return 0 }
+// ─── Análise Gemini ───────────────────────────────────────────────────────────
+
+function buildPrompt(imovel) {
+  const desconto = imovel.valor_avaliacao && imovel.valor_minimo
+    ? Math.round((1 - imovel.valor_minimo / imovel.valor_avaliacao) * 100)
+    : null
+  const moeda = v => v ? `R$ ${v.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}` : 'Não informado'
+
+  return `Você é um especialista em avaliação de imóveis em leilão no Brasil, com foco em São Paulo.
+
+Analise o imóvel abaixo e retorne APENAS um JSON válido:
+
+## Dados
+- Título: ${imovel.titulo || 'N/A'}
+- Tipo: ${imovel.tipo}
+- Cidade: ${imovel.cidade || 'N/A'}
+- Área: ${imovel.area_m2 ? imovel.area_m2 + ' m²' : 'N/A'}
+- Valor avaliação: ${moeda(imovel.valor_avaliacao)}
+- Lance mínimo: ${moeda(imovel.valor_minimo)}
+- Desconto s/ avaliação: ${desconto !== null ? desconto + '%' : 'N/A'}
+- Data leilão: ${imovel.data_leilao ? new Date(imovel.data_leilao).toLocaleDateString('pt-BR') : 'N/A'}
+- Ocupação: ${imovel.status_ocupacao}
+- Fonte: ${imovel.fonte}
+
+## JSON esperado:
+{
+  "analise_completa": "3-5 parágrafos: potencial, contexto regional, comparação de mercado, riscos, recomendação",
+  "pontuacao": <1-10>,
+  "valor_mercado_estimado": <número ou null>,
+  "desconto_percentual": <% real vs mercado ou null>,
+  "riscos": ["risco 1", "risco 2"],
+  "pontos_positivos": ["ponto 1", "ponto 2"],
+  "recomendacao": "oportunidade" | "analisar_mais" | "evitar"
+}
+
+Pontuação: 8-10=oportunidade clara, 6-7=investigar, 4-5=risco moderado, 1-3=evitar.`
+}
+
+async function analisarImovel(imovel) {
+  if (!genAI) return null
   try {
-    const r = await fetch(`${APP_URL}/api/analyze`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-cron-secret': CRON_SECRET },
-      body: JSON.stringify({ limite: 20 }),
-      signal: AbortSignal.timeout(300000),
-    })
-    const d = await r.json()
-    return d.analisados ?? 0
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' })
+    const result = await model.generateContent(buildPrompt(imovel))
+    const texto = result.response.text()
+    const jsonMatch = texto.match(/\{[\s\S]*\}/)
+    if (!jsonMatch) throw new Error('JSON não encontrado na resposta')
+    return JSON.parse(jsonMatch[0])
   } catch (e) {
-    console.error('Erro ao chamar /api/analyze:', e.message)
-    return 0
+    console.error(`    Erro Gemini (${imovel.id?.substring(0, 8)}): ${e.message}`)
+    return null
   }
 }
+
+async function analisarNovos(limite = 20) {
+  if (!genAI) {
+    console.log('  GEMINI_API_KEY não configurada — pulando análise')
+    return 0
+  }
+
+  const { data: imoveis, error } = await sb.from('imoveis')
+    .select('*')
+    .eq('analisado', false)
+    .order('created_at', { ascending: true })
+    .limit(limite)
+
+  if (error) { console.error('  Erro ao buscar pendentes:', error.message); return 0 }
+  if (!imoveis?.length) { console.log('  Nenhum imóvel pendente de análise'); return 0 }
+
+  console.log(`  ${imoveis.length} imóveis para analisar`)
+  let analisados = 0
+
+  for (const imovel of imoveis) {
+    const resultado = await analisarImovel(imovel)
+    if (!resultado) continue
+
+    const { error: errA } = await sb.from('analises').insert({
+      imovel_id: imovel.id,
+      analise_completa:      resultado.analise_completa,
+      pontuacao:             resultado.pontuacao,
+      valor_mercado_estimado: resultado.valor_mercado_estimado,
+      desconto_percentual:   resultado.desconto_percentual,
+      riscos:                resultado.riscos,
+      pontos_positivos:      resultado.pontos_positivos,
+      recomendacao:          resultado.recomendacao,
+    })
+
+    if (!errA) {
+      await sb.from('imoveis').update({ analisado: true }).eq('id', imovel.id)
+      analisados++
+      console.log(`    ✓ [${resultado.pontuacao}/10] ${imovel.titulo?.substring(0, 55)} — ${resultado.recomendacao}`)
+    } else {
+      console.error(`    Erro ao salvar análise: ${errA.message}`)
+    }
+
+    await new Promise(r => setTimeout(r, 600))
+  }
+
+  return analisados
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
   console.log(`\n=== Leilão Radar — Scraper (${new Date().toLocaleString('pt-BR')}) ===\n`)
@@ -221,8 +285,8 @@ async function main() {
   const novos = await salvarNoSupabase(imoveis, 'leilaobrasil')
   console.log(`   Novos registros: ${novos}`)
 
-  console.log('\n3. Acionando análise via Gemini...')
-  const analisados = await triggrarAnalise()
+  console.log('\n3. Analisando com Gemini (direto, sem Vercel)...')
+  const analisados = await analisarNovos(30)
   console.log(`   Imóveis analisados: ${analisados}`)
 
   console.log('\n=== Concluído ===')
