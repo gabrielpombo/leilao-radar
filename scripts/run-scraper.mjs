@@ -88,56 +88,52 @@ async function scraperLeilaoBrasil() {
   const html = await fetchPage('https://www.leilaobrasil.com.br')
   const $ = cheerio.load(html)
 
-  const totalImgs = $('img.img-evento[alt]').length
-  console.log(`  Imagens img-evento encontradas: ${totalImgs}`)
+  // Positional match: Nth img.img-evento corresponds to Nth .cont-infos
+  const imgs      = $('img.img-evento[alt]').toArray()
+  const contInfos = $('.cont-infos').toArray()
+  console.log(`  img.img-evento: ${imgs.length} | .cont-infos: ${contInfos.length}`)
 
-  // Debug: mostrar dados do primeiro item
-  const firstImg = $('img.img-evento[alt]').first()
-  if (firstImg.length) {
-    const hc = firstImg.parent('a').closest('.h-card')
-    const ci = hc.next('.cont-infos')
+  // Debug first pair
+  if (imgs.length && contInfos.length) {
+    const ci0text = $(contInfos[0]).text().replace(/\s+/g, ' ').substring(0, 250)
     console.log(`  --- Debug 1º item ---`)
-    console.log(`  alt: ${firstImg.attr('alt')}`)
-    console.log(`  href: ${firstImg.parent('a').attr('href')}`)
-    console.log(`  cont-infos (200 chars): ${ci.text().replace(/\s+/g, ' ').substring(0, 200)}`)
+    console.log(`  alt: ${$(imgs[0]).attr('alt')}`)
+    console.log(`  href: ${$(imgs[0]).parent('a').attr('href')}`)
+    console.log(`  cont-infos[0] (250 chars): ${ci0text}`)
     console.log(`  ---`)
   }
 
-  // .h-card is the image container; .cont-infos (sibling) holds city/values/dates.
-  // Title comes from the img alt attribute inside .h-card.
-  $('img.img-evento[alt]').each((_, imgEl) => {
-    const img = $(imgEl)
-    const titulo = img.attr('alt')?.replace(/\s+/g, ' ').trim() || ''
-    if (!titulo || titulo.length < 5) return
+  const count = Math.min(imgs.length, contInfos.length)
+  for (let i = 0; i < count; i++) {
+    const img = $(imgs[i])
+    const ci  = $(contInfos[i])
 
-    // URL from the wrapping <a>
-    const anchor = img.parent('a')
-    const href = anchor.attr('href')
-    if (!href || !href.includes('/eventos/leilao/')) return
+    const titulo = img.attr('alt')?.replace(/\s+/g, ' ').trim() || ''
+    if (!titulo || titulo.length < 5) continue
+
+    const href = img.parent('a').attr('href') || ''
+    if (!href.includes('/eventos/leilao/')) continue
 
     const url_original = href.startsWith('http')
       ? href
       : `https://www.leilaobrasil.com.br${href}`
 
-    if (seen.has(url_original)) return
+    if (seen.has(url_original)) continue
     seen.add(url_original)
 
-    // Sibling .cont-infos for all metadata
-    const hcard = anchor.closest('.h-card')
-    const contInfos = hcard.next('.cont-infos')
-    const texto = contInfos.text().replace(/\s+/g, ' ')
+    const texto = ci.text().replace(/\s+/g, ' ')
 
     // Apenas SP
-    if (!texto.includes('SP -') && !texto.includes('SP –')) return
+    if (!texto.includes('SP -') && !texto.includes('SP –')) continue
 
     // Tipo
     const tipo = normalizarTipo(titulo)
-    if (!tipo) return
+    if (!tipo) continue
 
     // Cidade
     const cidade = extrairCidade(texto)
 
-    // Valores — "Valor inicial: R$ 2.625.000,00"
+    // Valores
     const valoresMatch = [...texto.matchAll(/R\$\s*([\d.]+,\d{2})/g)]
     const valor_minimo    = valoresMatch[0] ? parseMoeda('R$ ' + valoresMatch[0][1]) : null
     const valor_avaliacao = valoresMatch[1] ? parseMoeda('R$ ' + valoresMatch[1][1]) : null
@@ -170,7 +166,7 @@ async function scraperLeilaoBrasil() {
         snippet: texto.substring(0, 600),
       },
     })
-  })
+  }
 
   console.log(`  Total SP encontrado: ${imoveis.length} imóveis`)
   // Log amostra
